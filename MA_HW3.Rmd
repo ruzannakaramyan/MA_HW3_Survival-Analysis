@@ -1,0 +1,359 @@
+---
+title: "Marketing Homework 3"
+output: 
+  pdf_document:
+    toc: true            
+    number_sections: true  
+---
+
+```{r echo=TRUE}
+
+library(survival)
+library(ggplot2)
+library(dplyr)
+
+# preparing data
+telco <- read.csv("data/telco.csv") %>%
+  mutate(across(c(marital, ed, retire, gender, voice, internet, forward, churn), as.factor)) %>%
+  mutate(churn_numeric = as.numeric(churn == "Yes")) 
+
+
+formula <- Surv(tenure, churn_numeric) ~ age + income + marital + ed + internet + voice
+
+# Fit 4 AFT models
+aft_weibull <- survreg(formula, data = telco, dist = "weibull")
+aft_exp <- survreg(formula, data = telco, dist = "exponential")
+aft_llogis <- survreg(formula, data = telco, dist = "loglogistic")
+aft_lnorm <- survreg(formula, data = telco, dist = "lognormal")
+
+# Compare AIC
+model_comparison <- data.frame(
+  Model = c("Weibull", "Exponential", "Log-Logistic", "Log-Normal"),
+  AIC = c(AIC(aft_weibull), AIC(aft_exp), AIC(aft_llogis), AIC(aft_lnorm))
+)
+
+print(model_comparison)
+
+#representative customer profile
+newdata <- data.frame(
+  age = 40, 
+  income = 60, 
+  marital = factor("Married", levels = levels(telco$marital)),
+  ed = factor("College degree", levels = levels(telco$ed)),
+  internet = factor("Yes", levels = levels(telco$internet)),
+  voice = factor("Yes", levels = levels(telco$voice))
+)
+
+# Function to predict survival probabilities
+predict_survival <- function(model, newdata, times, dist) {
+  lp <- predict(model, newdata = newdata, type = "lp")
+  scale <- model$scale
+  
+  if (dist == "weibull") {
+    1 - pweibull(times, shape = 1/scale, scale = exp(lp))
+  } else if (dist == "exponential") {
+    1 - pexp(times, rate = 1/exp(lp))
+  } else if (dist == "loglogistic") {
+    1 / (1 + (times/exp(lp))^(1/scale))
+  } else if (dist == "lognormal") {
+    1 - plnorm(times, meanlog = lp, sdlog = scale)
+  }
+}
+
+# survival curves
+times <- seq(0, max(telco$tenure), length.out = 100)
+surv_data <- data.frame(
+  time = rep(times, 4),
+  survival = c(
+    predict_survival(aft_weibull, newdata, times, "weibull"),
+    predict_survival(aft_exp, newdata, times, "exponential"),
+    predict_survival(aft_llogis, newdata, times, "loglogistic"),
+    predict_survival(aft_lnorm, newdata, times, "lognormal")),
+  model = rep(c("Weibull", "Exponential", "Log-Logistic", "Log-Normal"), each = length(times))
+)
+
+# Plot survival curves
+ggplot(surv_data, aes(x = time, y = survival, color = model)) +
+  geom_line(size = 1) +
+  labs(title = "Survival Curves by AFT Model",
+       x = "Tenure (months)",
+       y = "Survival Probability",
+       color = "Distribution") +
+  theme_minimal()
+``` 
+
+```{r echo=TRUE}
+# Check significance of predictors
+summary(aft_lnorm)
+summary(aft_weibull)
+summary(aft_exp)
+summary(aft_llogis)
+
+```
+
+```{r echo=TRUE}
+# log-logistic model with only significant predictors
+final_formula <- Surv(tenure, churn_numeric) ~ age + marital + internet
+final_model <- survreg(final_formula, data = telco, dist = "loglogistic")
+
+# Check final model summary
+summary(final_model)
+
+# Verify AIC improvement
+AIC(final_model)
+
+```
+
+```{r echo=TRUE}
+
+predict_survival <- function(model, newdata, times, dist) {
+  lp <- predict(model, newdata = newdata, type = "lp")
+  scale <- model$scale
+  
+  if (dist == "weibull") {
+    1 - pweibull(times, shape = 1/scale, scale = exp(lp))
+  } else if (dist == "exponential") {
+    1 - pexp(times, rate = 1/exp(lp))
+  } else if (dist == "loglogistic") {
+    1 / (1 + (times/exp(lp))^(1/scale))
+  } else if (dist == "lognormal") {
+    1 - plnorm(times, meanlog = lp, sdlog = scale)
+  }
+}
+
+#Preparing data
+telco <- telco %>%
+  mutate(
+    across(c(marital, ed, retire, gender, voice, internet, forward, custcat, churn), as.factor),
+    churn_numeric = as.numeric(churn == "Yes"),
+    monthly_revenue = case_when(
+      custcat == "Basic" ~ 30,
+      custcat == "Plus" ~ 50,
+      custcat == "Premium" ~ 80,
+      TRUE ~ 40
+    ),
+    monthly_cost = case_when(
+      internet == "Yes" & voice == "Yes" ~ 25,
+      internet == "Yes" ~ 20,
+      voice == "Yes" ~ 15,
+      TRUE ~ 10
+    ),
+    monthly_margin = monthly_revenue - monthly_cost
+  )
+
+# survival model
+final_model <- survreg(
+  Surv(tenure, churn_numeric) ~ age + marital + income + internet + voice + custcat,
+  data = telco,
+  dist = "loglogistic"
+)
+
+# CLV calculation parameters
+time_horizon <- 60  
+time_periods <- 1:time_horizon
+annual_discount_rate <- 0.10
+monthly_discount_rate <- (1 + annual_discount_rate)^(1/12) - 1
+
+# survival probability matrix
+survival_matrix <- sapply(time_periods, function(t) {
+  predict_survival(final_model, telco, t, dist = "loglogistic")
+})
+
+# discounting
+discount_factors <- (1 + monthly_discount_rate)^-time_periods
+discounted_survival <- sweep(survival_matrix, 2, discount_factors, `*`)
+
+# Calculate CLV 
+if (exists("telco") && "monthly_margin" %in% names(telco)) {
+  telco$CLV <- telco$monthly_margin * rowSums(discounted_survival, na.rm = TRUE)
+} else {
+  stop("Required columns not found in telco dataframe")
+}
+
+
+if ("CLV" %in% names(telco)) {
+  print(summary(telco$CLV))
+  
+  # 9. Visualize
+  ggplot(telco, aes(x = CLV)) +
+    geom_histogram(fill = "steelblue", bins = 30) +
+    scale_x_continuous(labels = scales::dollar) +
+    labs(title = "Customer Lifetime Value Distribution",
+         x = "CLV", y = "Number of Customers") +
+    theme_minimal()
+} else {
+  message("CLV column creation failed. Please check the calculation steps.")
+  print(head(telco))
+}
+```
+
+```{r echo=TRUE}
+# Segment analysis by gender and other demographics
+gender_segments <- telco %>%
+  group_by(gender) %>%
+  summarise(
+    avg_clv = mean(CLV, na.rm = TRUE),
+    median_clv = median(CLV, na.rm = TRUE),
+    customers = n(),
+    churn_rate = mean(churn_numeric, na.rm = TRUE),
+    avg_tenure = mean(tenure, na.rm = TRUE)
+  ) %>%
+  arrange(desc(avg_clv))
+
+# gender segments
+print(gender_segments)
+
+demo_segments <- telco %>%
+  group_by(
+    gender,
+    age_group = cut(age, breaks = c(18, 30, 40, 50, 60, 100), 
+                   labels = c("18-30", "31-40", "41-50", "51-60", "60+")),
+    marital
+  ) %>%
+  summarise(
+    avg_clv = mean(CLV, na.rm = TRUE),
+    customers = n(),
+    .groups = 'drop'
+  ) %>%
+  filter(customers > 10) %>%  # Only show segments with sufficient samples
+  arrange(desc(avg_clv))
+
+# gender differences
+ggplot(gender_segments, aes(x = gender, y = avg_clv, fill = gender)) +
+  geom_col() +
+  scale_y_continuous(labels = scales::dollar) +
+  labs(title = "Average CLV by Gender",
+       x = "Gender",
+       y = "Average CLV") +
+  theme_minimal()
+
+# age and gender patterns
+ggplot(demo_segments, aes(x = age_group, y = avg_clv, fill = gender)) +
+  geom_col(position = "dodge") +
+  facet_wrap(~marital) +
+  scale_y_continuous(labels = scales::dollar) +
+  labs(title = "CLV by Age, Gender and Marital Status",
+       x = "Age Group",
+       y = "Average CLV") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+Report
+
+The results of my code showed that the Log-Logistic model has the lowest AIC (3011.891), indicating it provides the best balance of model fit and complexity for this dataset.This suggests customer churn follows a hazard rate that initially increases then decreases over time (characteristic of log-logistic distributions), which matches common customer lifecycle patterns where churn risk peaks after onboarding then declines for loyal customers. Also, I considered the summary info of wach distribution. Hence, I chose it for my final model and eliminated insignificant variables. 
+
+From the CLV histogram we can say that the long tail on the left (lower CLV) shows that most customers cluster near higher values, but a minority of low-value customers drag the average down.
+
+While calculating CLV of male and female customers seperately, we can state that while males show slightly higher average CLV (+1.9%), the median values are nearly identical (1,013 vs 1,011), suggesting the small difference comes from outliers rather than central tendency. From the segmentation graphs we can say that CLV increases with the age and it is generally higher for married people. This makes total sense and aligns with real life scenarios. According to the graphs the most valueable segment is "Male" and "Married."
+
+```{r echo=TRUE}
+
+
+time_periods <- 1:120  
+monthly_discount_rate <- (1 + 0.07)^(1/12) - 1
+
+
+telco <- telco %>%
+  mutate(
+    monthly_margin = monthly_revenue * 0.75 - monthly_cost  
+  )
+
+
+telco <- telco %>%
+  mutate(
+    survival_1yr = predict_survival(
+      final_model,
+      newdata = telco,
+      times = 12,  # 1 year = 12 months
+      dist = "loglogistic"
+    )
+  )
+
+
+survival_matrix <- sapply(time_periods, function(t) {
+  predict_survival(final_model, telco, t, dist = "loglogistic")
+})
+discounted_survival <- sweep(survival_matrix, 2, (1 + monthly_discount_rate)^-time_periods, `*`)
+telco$CLV <- telco$monthly_margin * rowSums(discounted_survival, na.rm = TRUE)
+
+
+at_risk <- telco %>%
+  filter(
+    survival_1yr < 0.7,                
+    CLV > 100,                         
+    CLV < quantile(telco$CLV, 0.75, na.rm = TRUE)  
+  )
+
+
+budget_params <- list(
+  n_at_risk = nrow(at_risk),
+  avg_clv_at_risk = mean(at_risk$CLV, na.rm = TRUE),
+  total_clv_at_risk = sum(at_risk$CLV, na.rm = TRUE),
+  retention_rate = 0.6,
+  budget_pct = 0.15,
+  suggested_budget = sum(at_risk$CLV, na.rm = TRUE) * 0.15 * 0.6
+)
+
+
+budget_breakdown <- at_risk %>%
+  mutate(
+    segment = case_when(
+      CLV > quantile(telco$CLV, 0.6, na.rm = TRUE) ~ "High-Value",
+      TRUE ~ "Standard"
+    )
+  ) %>%
+  group_by(segment) %>%
+  summarise(
+    customers = n(),
+    avg_clv = mean(CLV, na.rm = TRUE),
+    budget_allocation = sum(CLV, na.rm = TRUE) * 0.15 * 0.6,
+    .groups = "drop"
+  )
+
+
+cat("At-risk customers:", budget_params$n_at_risk, "\n")
+cat("Avg CLV at risk: $", round(budget_params$avg_clv, 2), "\n")
+cat("Total CLV at risk: $", round(budget_params$total_clv_at_risk, 2), "\n")
+cat("Suggested annual budget: $", round(budget_params$suggested_budget, 2), "\n\n")
+
+print(budget_breakdown)
+
+
+library(ggplot2)
+ggplot(budget_breakdown, aes(x = segment, y = budget_allocation, fill = segment)) +
+  geom_col() +
+  geom_text(aes(label = paste0("$", round(budget_allocation, 0))), vjust = -0.3) +
+  labs(title = "Recommended Retention Budget by Segment",
+       subtitle = paste("Total Budget: $", round(budget_params$suggested_budget, 2)),
+       x = "Customer Segment",
+       y = "Budget Allocation") +
+  scale_y_continuous(labels = scales::dollar) +
+  theme_minimal()
+```
+The analysis reveals your Standard at-risk segment contains 64 customers with an average CLV of  $215, allocating $1,241 for retention efforts (~$19 per customer). This represents a low-value, high-churn population - likely basic plan subscribers or inactive accounts. While this budget supports cost-effective tactics like automated emails or minor incentives, the strikingly low CLV suggests potential issues:
+
+
+Recommendations:  
+
+1. High-Value Win-Back Campaigns
+- Target: Customers who churned within last 3 months with top 25% CLV
+- Tactic: Offer 10-15% of their CLV as reactivation credit
+
+2. At-Risk Customer Triage
+- Target: Customers with 40-60% 1-year survival probability
+- Tactic: Proactive retention offers before churn
+
+3. Usage-Based Incentives
+- Target: Customers with >30% usage decline
+- Tactic: Data/voice boosters + "We noticed you're using less data..."
+
+4. Contract Renewal Optimization
+- Target: Customers nearing contract end
+- Tactic: Early renewal bonuses
+- Execution: "Renew now and get [premium feature] free"
+
+Key Metrics to Track:
+- Cost per Saved Customer (target <30% of CLV)
+- Retention Rate Lift (aim for +15-25%)
+- Saved CLV vs. Retention Spend
+
