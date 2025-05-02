@@ -9,7 +9,7 @@ This homework analyzes customer churn data using survival analysis techniques to
 ## 📂 Files
 - `data/telco.csv` - Raw dataset
 - `MA_HW3.Rmd` - R code and documentation
-- `report.pdf` - Final compiled report
+- `Report.pdf` - Final compiled report
 
 ## ▶️ How to Run
 1. Open `MA_HW3.Rmd` in RStudio
